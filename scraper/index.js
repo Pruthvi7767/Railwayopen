@@ -4,53 +4,109 @@ import { chromium } from "playwright";
 const app = express();
 app.use(express.json());
 
-app.post("/scrape", async (req, res) => {
-  const { url } = req.body;
+app.post("/search", async (req, res) => {
+  const { query } = req.body;
+
+  let browser;
 
   try {
-    const browser = await chromium.launch({
+    browser = await chromium.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
-    const page = await browser.newPage();
-
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
+    const context = await browser.newContext({
+      storageState: "auth.json"
     });
 
-    // wait a bit (important for dynamic sites)
+    const page = await context.newPage();
+
+    // BLOCK ALL WRITE ACTIONS
+    await page.route("**/*", (route) => {
+      const request = route.request();
+      if (request.method() === "POST") {
+        return route.abort();
+      }
+      route.continue();
+    });
+
+    console.log("Searching Google...");
+
+    await page.goto(
+      `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+      { waitUntil: "domcontentloaded", timeout: 30000 }
+    );
+
     await page.waitForTimeout(3000);
 
-    // scroll once (basic)
-    await page.evaluate(() => {
-      window.scrollBy(0, 1000);
+    // GET SEARCH LINKS
+    const links = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("a"))
+        .map((a) => a.href)
+        .filter((href) => href.startsWith("http"))
+        .slice(0, 5);
     });
 
-    await page.waitForTimeout(2000);
+    let results = [];
 
-    // extract text
-    const content = await page.evaluate(() => {
-      return document.body.innerText;
-    });
+    for (const link of links) {
+      try {
+        console.log("Opening:", link);
+
+        await page.goto(link, { timeout: 20000 });
+        await page.waitForTimeout(3000);
+
+        // scroll
+        for (let i = 0; i < 3; i++) {
+          await page.mouse.wheel(0, 1000);
+          await page.waitForTimeout(1500);
+        }
+
+        const data = await page.evaluate(() => {
+          const texts = Array.from(document.querySelectorAll("p, span"))
+            .map((el) => el.innerText)
+            .filter((t) => t.length > 30)
+            .slice(0, 10);
+
+          const images = Array.from(document.querySelectorAll("img"))
+            .map((img) => img.src)
+            .filter((src) => src.startsWith("http"))
+            .slice(0, 5);
+
+          return { texts, images };
+        });
+
+        results.push({
+          source: link,
+          ...data
+        });
+
+      } catch (err) {
+        console.log("Skipped:", link);
+        continue;
+      }
+    }
 
     await browser.close();
 
     res.json({
       success: true,
-      data: content.slice(0, 2000) // limit size
+      query,
+      results
     });
 
-  } catch (error) {
+  } catch (err) {
+    console.error("SCRAPER ERROR:", err);
+
+    if (browser) await browser.close();
+
     res.status(500).json({
       success: false,
-      error: error.message
+      error: err.message
     });
   }
 });
 
-// IMPORTANT: use Railway port
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
