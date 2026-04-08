@@ -23,7 +23,7 @@ app.post("/search", async (req, res) => {
 
     const page = await context.newPage();
 
-    // block write actions
+    // BLOCK WRITE ACTIONS
     await page.route("**/*", (route) => {
       if (route.request().method() === "POST") {
         return route.abort();
@@ -37,12 +37,12 @@ app.post("/search", async (req, res) => {
 
     await page.waitForTimeout(2000);
 
-    // ===== SEARCH ENGINE LOGIC =====
     let links = [];
 
-    // TRY GOOGLE FIRST
+    // ===== TRY GOOGLE =====
     try {
       console.log("Trying Google...");
+
       await page.goto(
         `https://www.google.com/search?hl=en&q=${encodeURIComponent(query)}`,
         { timeout: 20000 }
@@ -51,19 +51,19 @@ app.post("/search", async (req, res) => {
       await page.waitForTimeout(3000);
 
       links = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll("a"))
-          .map((a) => a.href)
-          .filter((href) => href.startsWith("http"))
+        return Array.from(document.querySelectorAll("a h3"))
+          .map((h3) => h3.closest("a").href)
+          .filter((link) => link.startsWith("http"))
           .slice(0, 5);
       });
 
-      // detect block
-      if (links.some((l) => l.includes("sorry"))) {
+      // detect google block
+      if (links.length === 0) {
         throw new Error("Google blocked");
       }
 
     } catch (err) {
-      console.log("Google blocked → switching to DuckDuckGo");
+      console.log("Google blocked → using DuckDuckGo");
 
       await page.goto(
         `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
@@ -73,16 +73,18 @@ app.post("/search", async (req, res) => {
       await page.waitForTimeout(3000);
 
       links = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll("a"))
+        return Array.from(
+          document.querySelectorAll("a[data-testid='result-title-a']")
+        )
           .map((a) => a.href)
-          .filter((href) => href.startsWith("http"))
+          .filter((link) => link.startsWith("http"))
           .slice(0, 5);
       });
     }
 
     let results = [];
 
-    // ===== VISIT LINKS =====
+    // ===== VISIT EACH LINK =====
     for (const link of links) {
       try {
         console.log("Opening:", link);
@@ -90,7 +92,7 @@ app.post("/search", async (req, res) => {
         await page.goto(link, { timeout: 20000 });
         await page.waitForTimeout(3000);
 
-        // scroll like human
+        // scroll
         for (let i = 0; i < 3; i++) {
           await page.mouse.wheel(0, 1000);
           await page.waitForTimeout(1500);
@@ -99,8 +101,8 @@ app.post("/search", async (req, res) => {
         const data = await page.evaluate(() => {
           const texts = Array.from(document.querySelectorAll("p, span"))
             .map((el) => el.innerText)
-            .filter((t) => t.length > 30)
-            .slice(0, 10);
+            .filter((t) => t.length > 40)
+            .slice(0, 8);
 
           const images = Array.from(document.querySelectorAll("img"))
             .map((img) => img.src)
