@@ -1,6 +1,5 @@
 import express from "express";
 import { chromium } from "playwright";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
@@ -24,62 +23,74 @@ async function callAI(prompt) {
 
     const data = await res.json();
     return data?.choices?.[0]?.message?.content || "";
-  } catch {
+  } catch (err) {
+    console.log("AI Error:", err.message);
     return "";
   }
 }
 
 // ===== INTENT DETECTION =====
 async function detectIntent(query) {
-  // fallback logic first (fast)
   const q = query.toLowerCase();
 
   if (q.includes("flat") || q.includes("rent") || q.includes("2bhk")) return "real_estate";
   if (q.includes("price") || q.includes("buy") || q.includes("iphone")) return "product";
   if (q.includes("who") || q.includes("what") || q.includes("meaning")) return "knowledge";
 
-  // optional AI (smarter)
   if (process.env.OPENROUTER_API_KEY) {
-    const ai = await callAI(`
+    try {
+      const ai = await callAI(`
 Classify this query into one:
 knowledge / real_estate / product / general
 
 Query: ${query}
 Answer only one word.
-    `);
+      `);
 
-    return ai.trim().toLowerCase();
+      return ai.trim().toLowerCase();
+    } catch {
+      return "general";
+    }
   }
 
   return "general";
 }
 
 // ===== BROWSER =====
-async function getPage() {
-  const browser = await chromium.launch({
+async function getBrowser() {
+  return await chromium.launch({
     headless: true,
-    args: ["--no-sandbox"]
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
+}
 
-  const page = await browser.newPage();
-  return { browser, page };
+// ===== SAFE PAGE NAVIGATION =====
+async function safeGoto(page, url) {
+  try {
+    await page.goto(url, { timeout: 20000 });
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForTimeout(3000);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ===== KNOWLEDGE SEARCH =====
 async function quickAnswer(page, query) {
-  await page.goto(`https://duckduckgo.com/?q=${encodeURIComponent(query)}`);
-  await page.waitForTimeout(3000);
+  const ok = await safeGoto(page, `https://duckduckgo.com/?q=${encodeURIComponent(query)}`);
+  if (!ok) return null;
 
   return await page.evaluate(() => {
     const el = document.querySelector("a[data-testid='result-title-a']");
     return {
-      title: el?.innerText,
-      link: el?.href
+      title: el?.innerText || "",
+      link: el?.href || ""
     };
   });
 }
 
-// ===== GENERAL SEARCH (MULTI ENGINE) =====
+// ===== GENERAL SEARCH =====
 async function multiSearch(page, query) {
   const urls = [
     `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
@@ -89,28 +100,27 @@ async function multiSearch(page, query) {
   let results = [];
 
   for (const url of urls) {
-    try {
-      await page.goto(url);
-      await page.waitForTimeout(3000);
+    const ok = await safeGoto(page, url);
+    if (!ok) continue;
 
-      const data = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll("a"))
-          .map(a => ({
-            title: a.innerText,
-            link: a.href
-          }))
-          .filter(r => r.link && r.link.startsWith("http"))
-          .slice(0, 5);
-      });
+    const data = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("a"))
+        .map(a => ({
+          title: a.innerText,
+          link: a.href
+        }))
+        .filter(r =>
+          r.link &&
+          r.link.startsWith("http") &&
+          !r.link.includes("login") &&
+          !r.link.includes("settings")
+        )
+        .slice(0, 5);
+    });
 
-      results.push(...data);
-
-    } catch {
-      continue;
-    }
+    results.push(...data);
   }
 
-  // dedupe
   const seen = new Set();
   return results.filter(r => {
     if (seen.has(r.link)) return false;
@@ -119,10 +129,10 @@ async function multiSearch(page, query) {
   }).slice(0, 5);
 }
 
-// ===== REAL ESTATE SCRAPER =====
+// ===== REAL ESTATE =====
 async function scrapeHousing(page) {
-  await page.goto("https://housing.com/in/buy/searches/Pune");
-  await page.waitForTimeout(6000);
+  const ok = await safeGoto(page, "https://housing.com/in/buy/searches/Pune");
+  if (!ok) return [];
 
   return await page.evaluate(() => {
     return Array.from(document.querySelectorAll("article"))
@@ -133,10 +143,10 @@ async function scrapeHousing(page) {
   });
 }
 
-// ===== PRODUCT SCRAPER =====
+// ===== PRODUCTS =====
 async function scrapeProducts(page, query) {
-  await page.goto(`https://www.amazon.in/s?k=${encodeURIComponent(query)}`);
-  await page.waitForTimeout(6000);
+  const ok = await safeGoto(page, `https://www.amazon.in/s?k=${encodeURIComponent(query)}`);
+  if (!ok) return [];
 
   return await page.evaluate(() => {
     return Array.from(document.querySelectorAll("h2"))
@@ -147,7 +157,7 @@ async function scrapeProducts(page, query) {
   });
 }
 
-// ===== MAIN ROUTE =====
+// ===== MAIN =====
 app.post("/search", async (req, res) => {
   const { query } = req.body;
 
@@ -155,12 +165,13 @@ app.post("/search", async (req, res) => {
     return res.json({ success: false, error: "Query required" });
   }
 
-  let browser, page;
+  let browser;
 
   try {
     const intent = await detectIntent(query);
 
-    ({ browser, page } = await getPage());
+    browser = await getBrowser();
+    const page = await browser.newPage();
 
     let result;
 
@@ -179,7 +190,6 @@ app.post("/search", async (req, res) => {
 
     await browser.close();
 
-    // optional AI formatting
     let finalResult = result;
 
     if (process.env.OPENROUTER_API_KEY) {
@@ -212,7 +222,7 @@ ${JSON.stringify(result)}
 
 // ===== HEALTH =====
 app.get("/", (req, res) => {
-  res.send("Strong AI Search + Scraper Running 🚀");
+  res.send("Strong System Running 🚀");
 });
 
 app.listen(PORT, () => {
