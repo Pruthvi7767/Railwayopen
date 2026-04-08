@@ -15,9 +15,10 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "openrouter/google/gemini-2.0-flash-001",
+        "primary": "openrouter/google/gemma-4-31b-it:free",
         "fallbacks": [
-          "nvidia/meta/llama-3.1-405b-instruct"
+          "nvidia/nemotron-3-super-120b:free",
+          "openrouter/meta-llama/llama-3.3-70b-instruct:free"
         ]
       }
     }
