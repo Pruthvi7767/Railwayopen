@@ -6,28 +6,6 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ===== AI (OPTIONAL) =====
-async function callAI(prompt) {
-  try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "openrouter/free",
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-
-    const data = await res.json();
-    return data?.choices?.[0]?.message?.content || "";
-  } catch {
-    return "";
-  }
-}
-
 // ===== INTENT =====
 function detectIntent(query) {
   const q = query.toLowerCase();
@@ -52,7 +30,7 @@ async function safeGoto(page, url) {
   try {
     await page.goto(url, { timeout: 20000 });
     await page.waitForLoadState("domcontentloaded");
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(3000);
     return true;
   } catch {
     return false;
@@ -73,46 +51,67 @@ async function quickAnswer(page, query) {
   });
 }
 
-// ===== MULTI SEARCH =====
+// ===== FIXED MULTI SEARCH =====
 async function multiSearch(page, query) {
-  const urls = [
-    `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
-    `https://www.bing.com/search?q=${encodeURIComponent(query)}`
-  ];
-
   let results = [];
 
-  for (const url of urls) {
-    const ok = await safeGoto(page, url);
-    if (!ok) continue;
+  // DuckDuckGo
+  const ddgUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}`;
+  if (await safeGoto(page, ddgUrl)) {
+    try {
+      await page.waitForSelector("a[data-testid='result-title-a']", { timeout: 8000 });
 
-    const data = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll("a"))
-        .map(a => ({
-          title: a.innerText,
-          link: a.href
-        }))
-        .filter(r =>
-          r.link &&
-          r.link.startsWith("http") &&
-          !r.link.includes("login") &&
-          !r.link.includes("settings")
-        )
-        .slice(0, 5);
-    });
+      const ddgResults = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll("a[data-testid='result-title-a']"))
+          .map(el => ({
+            title: el.innerText,
+            link: el.href
+          }));
+      });
 
-    results.push(...data);
+      results.push(...ddgResults);
+    } catch {}
   }
 
+  // Bing
+  const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+  if (await safeGoto(page, bingUrl)) {
+    try {
+      await page.waitForSelector("li.b_algo h2 a", { timeout: 8000 });
+
+      const bingResults = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll("li.b_algo h2 a"))
+          .map(el => ({
+            title: el.innerText,
+            link: el.href
+          }));
+      });
+
+      results.push(...bingResults);
+    } catch {}
+  }
+
+  // Clean
   const seen = new Set();
-  return results.filter(r => {
-    if (seen.has(r.link)) return false;
-    seen.add(r.link);
-    return true;
-  }).slice(0, 5);
+
+  return results
+    .filter(r =>
+      r.link &&
+      r.link.startsWith("http") &&
+      !r.link.includes("duckduckgo.com") &&
+      !r.link.includes("bing.com") &&
+      !r.link.includes("login") &&
+      !r.link.includes("settings")
+    )
+    .filter(r => {
+      if (seen.has(r.link)) return false;
+      seen.add(r.link);
+      return true;
+    })
+    .slice(0, 5);
 }
 
-// ===== REAL ESTATE (FIXED) =====
+// ===== REAL ESTATE =====
 async function scrapeHousing(page) {
   const ok = await safeGoto(page, "https://housing.com/in/buy/searches/Pune");
   if (!ok) return [];
@@ -134,7 +133,7 @@ async function scrapeHousing(page) {
   }
 }
 
-// ===== PRODUCT =====
+// ===== PRODUCTS =====
 async function scrapeProducts(page, query) {
   const ok = await safeGoto(page, `https://www.amazon.in/s?k=${encodeURIComponent(query)}`);
   if (!ok) return [];
@@ -179,7 +178,6 @@ app.post("/search", async (req, res) => {
     else if (intent === "real_estate") {
       result = await scrapeHousing(page);
 
-      // 🔥 fallback if empty
       if (!result || result.length === 0) {
         result = await multiSearch(page, query);
       }
@@ -218,7 +216,7 @@ app.post("/search", async (req, res) => {
 
 // ===== HEALTH =====
 app.get("/", (req, res) => {
-  res.send("Strong Scraper Running 🚀");
+  res.send("Final Strong System Running 🚀");
 });
 
 app.listen(PORT, () => {
