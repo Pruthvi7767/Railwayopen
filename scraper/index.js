@@ -23,35 +23,18 @@ async function callAI(prompt) {
 
     const data = await res.json();
     return data?.choices?.[0]?.message?.content || "";
-  } catch (err) {
-    console.log("AI Error:", err.message);
+  } catch {
     return "";
   }
 }
 
-// ===== INTENT DETECTION =====
-async function detectIntent(query) {
+// ===== INTENT =====
+function detectIntent(query) {
   const q = query.toLowerCase();
 
   if (q.includes("flat") || q.includes("rent") || q.includes("2bhk")) return "real_estate";
   if (q.includes("price") || q.includes("buy") || q.includes("iphone")) return "product";
-  if (q.includes("who") || q.includes("what") || q.includes("meaning")) return "knowledge";
-
-  if (process.env.OPENROUTER_API_KEY) {
-    try {
-      const ai = await callAI(`
-Classify this query into one:
-knowledge / real_estate / product / general
-
-Query: ${query}
-Answer only one word.
-      `);
-
-      return ai.trim().toLowerCase();
-    } catch {
-      return "general";
-    }
-  }
+  if (q.includes("who") || q.includes("what")) return "knowledge";
 
   return "general";
 }
@@ -60,23 +43,23 @@ Answer only one word.
 async function getBrowser() {
   return await chromium.launch({
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    args: ["--no-sandbox"]
   });
 }
 
-// ===== SAFE PAGE NAVIGATION =====
+// ===== SAFE NAV =====
 async function safeGoto(page, url) {
   try {
     await page.goto(url, { timeout: 20000 });
     await page.waitForLoadState("domcontentloaded");
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(4000);
     return true;
   } catch {
     return false;
   }
 }
 
-// ===== KNOWLEDGE SEARCH =====
+// ===== KNOWLEDGE =====
 async function quickAnswer(page, query) {
   const ok = await safeGoto(page, `https://duckduckgo.com/?q=${encodeURIComponent(query)}`);
   if (!ok) return null;
@@ -90,7 +73,7 @@ async function quickAnswer(page, query) {
   });
 }
 
-// ===== GENERAL SEARCH =====
+// ===== MULTI SEARCH =====
 async function multiSearch(page, query) {
   const urls = [
     `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
@@ -129,32 +112,46 @@ async function multiSearch(page, query) {
   }).slice(0, 5);
 }
 
-// ===== REAL ESTATE =====
+// ===== REAL ESTATE (FIXED) =====
 async function scrapeHousing(page) {
   const ok = await safeGoto(page, "https://housing.com/in/buy/searches/Pune");
   if (!ok) return [];
 
-  return await page.evaluate(() => {
-    return Array.from(document.querySelectorAll("article"))
-      .map(el => ({
-        title: el.innerText.slice(0, 100)
-      }))
-      .slice(0, 5);
-  });
+  try {
+    await page.waitForSelector("article", { timeout: 10000 });
+
+    const listings = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("article"))
+        .map(el => ({
+          title: el.innerText.slice(0, 120)
+        }))
+        .slice(0, 5);
+    });
+
+    return listings;
+  } catch {
+    return [];
+  }
 }
 
-// ===== PRODUCTS =====
+// ===== PRODUCT =====
 async function scrapeProducts(page, query) {
   const ok = await safeGoto(page, `https://www.amazon.in/s?k=${encodeURIComponent(query)}`);
   if (!ok) return [];
 
-  return await page.evaluate(() => {
-    return Array.from(document.querySelectorAll("h2"))
-      .map(el => ({
-        title: el.innerText
-      }))
-      .slice(0, 5);
-  });
+  try {
+    await page.waitForSelector("h2", { timeout: 10000 });
+
+    return await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("h2"))
+        .map(el => ({
+          title: el.innerText
+        }))
+        .slice(0, 5);
+    });
+  } catch {
+    return [];
+  }
 }
 
 // ===== MAIN =====
@@ -168,46 +165,45 @@ app.post("/search", async (req, res) => {
   let browser;
 
   try {
-    const intent = await detectIntent(query);
+    const intent = detectIntent(query);
 
     browser = await getBrowser();
     const page = await browser.newPage();
 
-    let result;
+    let result = [];
 
     if (intent === "knowledge") {
       result = await quickAnswer(page, query);
     }
+
     else if (intent === "real_estate") {
       result = await scrapeHousing(page);
+
+      // 🔥 fallback if empty
+      if (!result || result.length === 0) {
+        result = await multiSearch(page, query);
+      }
     }
+
     else if (intent === "product") {
       result = await scrapeProducts(page, query);
+
+      if (!result || result.length === 0) {
+        result = await multiSearch(page, query);
+      }
     }
+
     else {
       result = await multiSearch(page, query);
     }
 
     await browser.close();
 
-    let finalResult = result;
-
-    if (process.env.OPENROUTER_API_KEY) {
-      const cleaned = await callAI(`
-Convert this into clean JSON:
-${JSON.stringify(result)}
-      `);
-
-      try {
-        finalResult = JSON.parse(cleaned);
-      } catch {}
-    }
-
     res.json({
       success: true,
       intent,
       query,
-      result: finalResult
+      result
     });
 
   } catch (err) {
@@ -222,7 +218,7 @@ ${JSON.stringify(result)}
 
 // ===== HEALTH =====
 app.get("/", (req, res) => {
-  res.send("Strong System Running 🚀");
+  res.send("Strong Scraper Running 🚀");
 });
 
 app.listen(PORT, () => {
