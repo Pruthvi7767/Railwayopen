@@ -20,11 +20,6 @@ const SEARCH_ENGINES = [
     name: "SearXNG",
     url: (q) => `https://searx.be/search?q=${encodeURIComponent(q)}`,
     selector: "a.result_header"
-  },
-  {
-    name: "Brave",
-    url: (q) => `https://search.brave.com/search?q=${encodeURIComponent(q)}`,
-    selector: "a"
   }
 ];
 
@@ -54,11 +49,12 @@ async function setupPage(browser) {
   return page;
 }
 
-// clean redirect URLs (especially Bing)
+// clean URLs
 function cleanUrl(url) {
   try {
     const u = new URL(url);
 
+    // fix Bing redirect
     if (u.hostname.includes("bing.com") && u.searchParams.get("u")) {
       return decodeURIComponent(u.searchParams.get("u"));
     }
@@ -69,7 +65,21 @@ function cleanUrl(url) {
   }
 }
 
-// score result quality
+// filter bad links
+function isValidLink(link) {
+  return (
+    link &&
+    link.startsWith("http") &&
+    !link.includes("settings") &&
+    !link.includes("login") &&
+    !link.includes("privacy") &&
+    !link.includes("terms") &&
+    !link.includes("duckduckgo.com") &&
+    !link.includes("bing.com")
+  );
+}
+
+// scoring
 function scoreResult(data) {
   let score = 0;
 
@@ -80,13 +90,24 @@ function scoreResult(data) {
   return score;
 }
 
+// detect real estate query
+function isRealEstateQuery(query) {
+  const keywords = ["flat", "rent", "buy", "house", "2bhk", "3bhk", "property"];
+  return keywords.some(k => query.toLowerCase().includes(k));
+}
+
 // ===== MAIN SEARCH =====
 
 app.post("/search", async (req, res) => {
-  const { query } = req.body;
+  let { query } = req.body;
 
   if (!query) {
     return res.json({ success: false, error: "Query required" });
+  }
+
+  // 🔥 improve query for real estate
+  if (isRealEstateQuery(query)) {
+    query += " site:magicbricks.com OR site:99acres.com OR site:housing.com";
   }
 
   let browser;
@@ -97,7 +118,7 @@ app.post("/search", async (req, res) => {
 
     let allLinks = [];
 
-    // 🔥 STEP 1: collect links from ALL engines
+    // STEP 1: collect links from all engines
     for (const engine of SEARCH_ENGINES) {
       try {
         console.log(`Searching ${engine.name}...`);
@@ -114,17 +135,20 @@ app.post("/search", async (req, res) => {
 
         allLinks.push(...links);
 
-      } catch (err) {
-        console.log(`${engine.name} failed`);
+      } catch {
+        continue;
       }
     }
 
-    // 🔥 STEP 2: clean + deduplicate
-    let links = [...new Set(allLinks)].map(cleanUrl).slice(0, 10);
+    // STEP 2: clean + filter + dedupe
+    let links = [...new Set(allLinks)]
+      .map(cleanUrl)
+      .filter(isValidLink)
+      .slice(0, 10);
 
     let results = [];
 
-    // 🔥 STEP 3: scrape each link
+    // STEP 3: scrape each page
     for (const link of links) {
       try {
         await page.goto(link, { timeout: 20000 });
@@ -159,7 +183,7 @@ app.post("/search", async (req, res) => {
       }
     }
 
-    // 🔥 STEP 4: sort + limit
+    // STEP 4: sort + limit
     results.sort((a, b) => b.score - a.score);
     results = results.slice(0, 5);
 
@@ -181,14 +205,14 @@ app.post("/search", async (req, res) => {
   }
 });
 
-// ===== HEALTH CHECK =====
+// ===== HEALTH =====
 app.get("/", (req, res) => {
-  res.send("Multi Search Engine Running 🚀");
+  res.send("Search Engine Running 🚀");
 });
 
-// ===== START SERVER =====
+// ===== START =====
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on ${PORT}`);
 });
